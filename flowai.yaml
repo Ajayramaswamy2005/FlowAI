@@ -1,0 +1,36 @@
+# Example FlowAI project configuration.
+# Copy into a project (or run `flowai init`). Values here override ~/.flowai/config.json;
+# FLOWAI_PROVIDER / FLOWAI_MODEL in the environment override both.
+project_name: "flowai-demo"
+
+provider: "nvidia"
+model: "deepseek-ai/deepseek-r1"
+temperature: 0.7
+max_iterations: 10
+
+# "ask" confirms before shell, python and MCP tools run; "auto" never asks.
+approval: "ask"
+
+# Per-provider overrides: where to send requests and which variable holds the key.
+providers:
+  nvidia:
+    api_key_env: "NVIDIA_API_KEY"
+    base_url: "https://integrate.api.nvidia.com/v1"
+  ollama:
+    base_url: "http://localhost:11434"
+
+# Tools borrowed from MCP servers (needs: pip install 'flowai-cli[mcp]').
+# mcp_servers:
+#   filesystem:
+#     command: "npx"
+#     args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
+
+memory:
+  backend: "in_memory"  # in_memory, qdrant, chroma
+  url: "http://localhost:6333"
+  collection_name: "flowai_memory"
+
+# `flowai serve`. Keep it on 127.0.0.1: the API drives an agent with shell access.
+server:
+  host: "127.0.0.1"
+  port: 8000

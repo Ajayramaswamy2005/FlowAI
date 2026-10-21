@@ -1,0 +1,87 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flowai-cli"
+version = "0.2.0"
+description = "FlowAI: an open-source, extensible Python agent harness with a terminal-first CLI."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Ajay Rama Swamy Katragaada" }]
+keywords = ["agent", "llm", "cli", "mcp", "fastapi", "nvidia", "ollama", "workflow", "pydantic"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "pydantic>=2.7.0",
+    "httpx>=0.27.0",
+    "pyyaml>=6.0.1",
+]
+
+[project.optional-dependencies]
+server = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.30.0",
+]
+mcp = [
+    "mcp>=1.0.0",
+]
+qdrant = [
+    "qdrant-client>=1.9.0",
+]
+chroma = [
+    "chromadb>=0.5.0",
+]
+observability = [
+    "opentelemetry-api>=1.25.0",
+    "opentelemetry-sdk>=1.25.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "fastapi>=0.111.0",
+    "httpx>=0.27.0",
+]
+all = [
+    "flowai-cli[server,mcp,qdrant,chroma,observability]",
+]
+
+[project.urls]
+Homepage = "https://github.com/Ajayramaswamy2005/FlowAI"
+Source = "https://github.com/Ajayramaswamy2005/FlowAI"
+Issues = "https://github.com/Ajayramaswamy2005/FlowAI/issues"
+
+[project.scripts]
+flowai = "flowai.cli.main:main"
+
+[project.entry-points."flowai.plugins"]
+# Third-party packages declare custom providers, tools or memory backends here.
+
+[tool.hatch.build.targets.wheel]
+packages = ["flowai"]
+
+[tool.hatch.build.targets.sdist]
+include = ["flowai", "tests", "examples", "README.md", "LICENSE", "flowai.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501", "B008"]

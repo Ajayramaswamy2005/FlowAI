@@ -1,0 +1,43 @@
+name: Publish to PyPI
+
+# Push a tag like flowai-v0.2.0 to release. The tag must match the version in pyproject.toml.
+on:
+  push:
+    tags:
+      - "flowai-v*.*.*"
+
+jobs:
+  pypi-publish:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # PyPI Trusted Publishing (OIDC)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check the tag matches the package version
+        run: |
+          TAG="${GITHUB_REF_NAME#flowai-v}"
+          VERSION=$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match pyproject version $VERSION"; exit 1
+          fi
+
+      - name: Test before publishing
+        run: |
+          pip install -e ".[dev]"
+          pytest -q
+
+      - name: Build wheel and sdist
+        run: |
+          pip install build
+          python -m build
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
