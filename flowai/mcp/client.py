@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from flowai.errors import ToolError
+from flowai.security.secrets import scrubbed_env
 from flowai.tools.base import BaseTool, ToolDefinition, ToolParameterSchema
 
 
@@ -31,8 +31,9 @@ class MCPClient:
             server_params = StdioServerParameters(
                 command=self.command,
                 args=self.args,
-                # None inherits the parent environment; {} would wipe PATH.
-                env={**os.environ, **self.env} if self.env else None,
+                # The server gets this process's environment minus its credentials,
+                # plus whatever its own config entry hands it on purpose.
+                env=scrubbed_env(self.env),
             )
 
             # We create an MCP bridge tool wrapper
@@ -50,8 +51,10 @@ class MCPClient:
                         ),
                     )
                     self.is_async = True
-                    # An external server can do anything, so its tools ask first.
+                    # An external server can do anything, so its tools ask first,
+                    # and the shield treats what they return as untrusted.
                     self.requires_approval = True
+                    self.external = True
 
                 async def execute(self, **kwargs: Any) -> Any:
                     async with stdio_client(server_params) as (read, write):

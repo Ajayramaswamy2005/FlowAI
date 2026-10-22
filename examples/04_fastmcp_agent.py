@@ -25,7 +25,7 @@ async def main():
     agent = Agent(
         name="MCPWorker",
         provider="nvidia",
-        model="deepseek-ai/deepseek-r1",
+        model="nvidia/nemotron-3.5-lightning-30b-a3b",
         tools=tools,
     )
 

@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from flowai.providers.base import Message
+from flowai.security.keystore import flowai_home, harden_permissions, secure_write
+from flowai.security.secrets import redact
 
 
 class SessionStore:
@@ -14,13 +16,18 @@ class SessionStore:
 
     def __init__(self, storage_dir: Path | str | None = None):
         if storage_dir is None:
-            self.storage_dir = Path.home() / ".flowai" / "sessions"
+            self.storage_dir = flowai_home() / "sessions"
         else:
             self.storage_dir = Path(storage_dir)
+        fresh = not self.storage_dir.exists()
         self.storage_dir.mkdir(parents=True, exist_ok=True)
+        if fresh:
+            harden_permissions(self.storage_dir, directory=True)
 
     def _get_path(self, session_id: str) -> Path:
-        return self.storage_dir / f"{session_id}.json"
+        # Session ids come from the command line; keep them from naming paths elsewhere.
+        safe = "".join(c for c in session_id if c.isalnum() or c in "-_") or "session"
+        return self.storage_dir / f"{safe}.json"
 
     def save(self, session_id: str, messages: list[Message], metadata: dict[str, Any] | None = None) -> Path:
         """Persist message history and metadata to disk."""
@@ -30,11 +37,12 @@ class SessionStore:
             "messages": [m.model_dump() for m in messages],
         }
         path = self._get_path(session_id)
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        # A transcript can hold a key the user pasted; it is written redacted and owner-only.
+        secure_write(path, redact(json.dumps(data, indent=2)), harden=False)
 
         # Update a 'latest' pointer for instant resumption
         latest_path = self.storage_dir / "latest.txt"
-        latest_path.write_text(session_id, encoding="utf-8")
+        secure_write(latest_path, session_id, harden=False)
         return path
 
     def load(self, session_id: str) -> list[Message]:

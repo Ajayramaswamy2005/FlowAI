@@ -17,6 +17,7 @@ from flowai.providers.base import (
     StreamChunk,
     ToolCall,
 )
+from flowai.security.keystore import resolve_api_key
 
 
 class GeminiProvider(BaseProvider):
@@ -33,7 +34,7 @@ class GeminiProvider(BaseProvider):
         timeout: float = 60.0,
         **kwargs: Any,
     ):
-        resolved_key = api_key or os.getenv("GEMINI_API_KEY", "")
+        resolved_key = api_key or resolve_api_key("GEMINI_API_KEY", "GOOGLE_API_KEY")
         resolved_url = base_url or os.getenv("GEMINI_BASE_URL", self.DEFAULT_BASE_URL)
         super().__init__(
             model=model,
@@ -42,6 +43,11 @@ class GeminiProvider(BaseProvider):
             timeout=timeout,
             **kwargs,
         )
+
+    def _get_headers(self) -> dict[str, str]:
+        # The key travels in a header, never in the URL: URLs end up in error
+        # messages, proxy logs and tracebacks.
+        return {"Content-Type": "application/json", "x-goog-api-key": self.api_key or ""}
 
     def _convert_messages(self, messages: Sequence[Message]) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
         system_instruction = None
@@ -111,7 +117,7 @@ class GeminiProvider(BaseProvider):
         max_tokens: int | None = None,
         **kwargs: Any,
     ) -> ProviderResponse:
-        url = f"{self.base_url.rstrip('/')}/models/{self.model}:generateContent?key={self.api_key}"
+        url = f"{self.base_url.rstrip('/')}/models/{self.model}:generateContent"
         system_instruction, contents = self._convert_messages(messages)
         payload: dict[str, Any] = {
             "contents": contents,
@@ -126,7 +132,7 @@ class GeminiProvider(BaseProvider):
 
         self.require_api_key()
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            resp = await client.post(url, json=payload)
+            resp = await client.post(url, headers=self._get_headers(), json=payload)
             await self._raise_for_status(resp)
             data = resp.json()
 
@@ -167,7 +173,7 @@ class GeminiProvider(BaseProvider):
         max_tokens: int | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamChunk]:
-        url = f"{self.base_url.rstrip('/')}/models/{self.model}:streamGenerateContent?key={self.api_key}&alt=sse"
+        url = f"{self.base_url.rstrip('/')}/models/{self.model}:streamGenerateContent?alt=sse"
         system_instruction, contents = self._convert_messages(messages)
         payload: dict[str, Any] = {
             "contents": contents,
@@ -183,7 +189,7 @@ class GeminiProvider(BaseProvider):
         self.require_api_key()
         call_index = 0
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            async with client.stream("POST", url, json=payload) as response:
+            async with client.stream("POST", url, headers=self._get_headers(), json=payload) as response:
                 await self._raise_for_status(response)
                 async for line in response.aiter_lines():
                     line = line.strip()
@@ -220,11 +226,11 @@ class GeminiProvider(BaseProvider):
         model: str | None = None,
         **kwargs: Any,
     ) -> list[list[float]]:
-        url = f"{self.base_url.rstrip('/')}/models/{model or 'text-embedding-004'}:batchEmbedContents?key={self.api_key}"
+        url = f"{self.base_url.rstrip('/')}/models/{model or 'text-embedding-004'}:batchEmbedContents"
         requests = [{"model": f"models/{model or 'text-embedding-004'}", "content": {"parts": [{"text": t}]}} for t in texts]
         self.require_api_key()
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            resp = await client.post(url, json={"requests": requests})
+            resp = await client.post(url, headers=self._get_headers(), json={"requests": requests})
             await self._raise_for_status(resp)
             data = resp.json()
         return [e["values"] for e in data.get("embeddings", [])]

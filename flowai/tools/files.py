@@ -12,6 +12,7 @@ import os
 import re
 from pathlib import Path
 
+from flowai.security.policy import sensitive_path_reason
 from flowai.tools.decorator import tool
 
 # Files larger than this are refused rather than silently truncating context.
@@ -178,7 +179,12 @@ def grep_files(pattern: str, path: str = ".", glob: str = "*", limit: int = 100)
     if root.is_file():
         candidates = [root]
     else:
-        candidates = [p for p in _iter_files(root) if fnmatch.fnmatch(p.name, glob)]
+        # A broad search never opens files that usually hold credentials; reading
+        # one takes an explicit read_file, which the shield asks the user about.
+        candidates = [
+            p for p in _iter_files(root)
+            if fnmatch.fnmatch(p.name, glob) and not sensitive_path_reason(p)
+        ]
 
     hits: list[str] = []
     for file_path in candidates:

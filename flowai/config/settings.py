@@ -10,15 +10,13 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from flowai.errors import ConfigurationError
-
-#: Where `flowai configure` keeps the provider and key chosen once per machine.
-GLOBAL_CONFIG_DIR = Path.home() / ".flowai"
-GLOBAL_CONFIG_PATH = GLOBAL_CONFIG_DIR / "config.json"
+from flowai.security import keystore
+from flowai.security.secrets import register_environment_secrets, register_secret
 
 #: Project config filenames, in the order they are looked for.
 PROJECT_CONFIG_NAMES = ("flowai.yaml", "flowai.yml", "flowai.toml", "flowai.json")
 
-#: Environment variable holding each provider's key.
+#: Environment variable `flowai configure` saves each provider's key under.
 PROVIDER_KEY_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
@@ -27,11 +25,19 @@ PROVIDER_KEY_ENV = {
     "openrouter": "OPENROUTER_API_KEY",
 }
 
+#: Every name a provider's key is accepted under, first match wins. NVIDIA
+#: hands out keys from build.nvidia.com and from NGC, and people export them
+#: under all of these.
+PROVIDER_KEY_ALIASES = {
+    "nvidia": ("NVIDIA_API_KEY", "NVAPI_KEY", "NGC_API_KEY", "NIM_API_KEY"),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+}
+
 #: Model used when a provider is chosen but no model is named.
 PROVIDER_DEFAULT_MODEL = {
     "anthropic": "claude-sonnet-5-5",
     "openai": "gpt-4o",
-    "nvidia": "deepseek-ai/deepseek-r1",
+    "nvidia": "nvidia/nemotron-3.5-lightning-30b-a3b",
     "gemini": "gemini-2.0-flash",
     "openrouter": "deepseek/deepseek-r1",
     "ollama": "llama3.2",
@@ -39,6 +45,20 @@ PROVIDER_DEFAULT_MODEL = {
 
 #: Order in which a provider is picked from whatever keys are present.
 PROVIDER_PREFERENCE = ("anthropic", "openai", "nvidia", "gemini", "openrouter")
+
+
+def provider_key_envs(provider: str) -> tuple[str, ...]:
+    """All environment names a provider's key may be found under."""
+    if provider in PROVIDER_KEY_ALIASES:
+        return PROVIDER_KEY_ALIASES[provider]
+    primary = PROVIDER_KEY_ENV.get(provider)
+    return (primary,) if primary else ()
+
+
+def nvidia_is_self_hosted(base_url: str | None) -> bool:
+    """A NIM running on your own machine or cluster needs no NVIDIA key."""
+    url = base_url or os.getenv("NVIDIA_BASE_URL") or os.getenv("NIM_BASE_URL") or ""
+    return bool(url) and "api.nvidia.com" not in url
 
 
 class ProviderConfig(BaseModel):
@@ -84,6 +104,8 @@ class Settings(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+    #: Things the user should know about their setup (a key in a project file, say).
+    notices: list[str] = Field(default_factory=list, exclude=True, repr=False)
 
     # ------------------------------------------------------------- loading
 
@@ -99,24 +121,20 @@ class Settings(BaseModel):
             data["project_name"] = project_path.parent.name
         cls._apply_environment(data)
 
-        return cls(**data)
+        settings = cls(**data)
+        if project_path:
+            settings.notices += _plaintext_key_notices(project_data, project_path)
+        settings._register_secrets()
+        return settings
 
     @staticmethod
     def _load_global() -> dict[str, Any]:
-        """Read ~/.flowai/config.json and export any keys it holds to the environment."""
-        if not GLOBAL_CONFIG_PATH.exists():
-            return {}
-        try:
-            data = json.loads(GLOBAL_CONFIG_PATH.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
-        if not isinstance(data, dict):
-            return {}
-        # Provider SDKs and our own providers both read keys from the environment.
-        for key, value in data.items():
-            if key.endswith("_API_KEY") and isinstance(value, str) and not os.getenv(key):
-                os.environ[key] = value
-        return data
+        """Read ~/.flowai/config.json, leaving the keys it names where they are.
+
+        Keys are not copied into os.environ: anything the agent starts would
+        inherit them from there. Providers resolve them on demand instead.
+        """
+        return {k: v for k, v in keystore.read_config().items() if not _is_key_name(k)}
 
     @staticmethod
     def _load_project(config_path: str | Path | None) -> tuple[dict[str, Any], Path | None]:
@@ -166,7 +184,7 @@ class Settings(BaseModel):
             data.pop("model", None)
         elif "provider" not in data:
             for provider in PROVIDER_PREFERENCE:
-                if os.getenv(PROVIDER_KEY_ENV[provider]):
+                if keystore.resolve_api_key(*provider_key_envs(provider)):
                     data["provider"] = provider
                     break
 
@@ -177,18 +195,27 @@ class Settings(BaseModel):
         if os.getenv("FLOWAI_MODEL"):
             data["model"] = os.getenv("FLOWAI_MODEL")
 
+    def _register_secrets(self) -> None:
+        """Teach the redactor every key this process could end up holding."""
+        register_environment_secrets()
+        for provider in PROVIDER_KEY_ENV:
+            key = self.provider_options(provider).get("api_key")
+            if key:
+                register_secret(key, PROVIDER_KEY_ENV[provider])
+
     # ------------------------------------------------------------- helpers
 
     def provider_options(self, provider: str | None = None) -> dict[str, Any]:
-        """Keyword arguments for building this provider (key and base URL, if set)."""
+        """Keyword arguments for building this provider: its key and base URL, if any."""
         name = provider or self.provider
         block = self.providers.get(name)
         options: dict[str, Any] = {}
-        if not block:
-            return options
-        if block.base_url:
-            options["base_url"] = block.base_url
-        key = block.api_key or (os.getenv(block.api_key_env) if block.api_key_env else None)
+        key = None
+        if block:
+            if block.base_url:
+                options["base_url"] = block.base_url
+            key = block.api_key or (os.getenv(block.api_key_env) if block.api_key_env else None)
+        key = key or keystore.resolve_api_key(*provider_key_envs(name))
         if key:
             options["api_key"] = key
         return options
@@ -198,7 +225,41 @@ class Settings(BaseModel):
         name = provider or self.provider
         if name == "ollama":
             return True
-        if self.provider_options(name).get("api_key"):
+        options = self.provider_options(name)
+        if name == "nvidia" and nvidia_is_self_hosted(options.get("base_url")):
             return True
-        env_name = PROVIDER_KEY_ENV.get(name)
-        return bool(env_name and os.getenv(env_name))
+        return bool(options.get("api_key"))
+
+    def key_source(self, provider: str | None = None) -> str | None:
+        """Where this provider's key comes from, in words, or None if there is none."""
+        name = provider or self.provider
+        block = self.providers.get(name)
+        if block and block.api_key:
+            return "project config file (plain text)"
+        for env_name in provider_key_envs(name):
+            location = keystore.key_location(env_name)
+            if location == "environment":
+                return f"environment variable {env_name}"
+            if location == "keyring":
+                return keystore.keyring_name() or "system keyring"
+            if location == "file":
+                return f"{keystore.config_path()} (plain text, owner-only)"
+        return None
+
+
+def _is_key_name(name: str) -> bool:
+    return name.endswith("_API_KEY") or name in ("NVAPI_KEY", "NGC_API_KEY", "NIM_API_KEY", "GOOGLE_API_KEY")
+
+
+def _plaintext_key_notices(project_data: dict[str, Any], path: Path) -> list[str]:
+    """Warn about keys written into a project file, which tends to get committed."""
+    found = [k for k in project_data if _is_key_name(k)]
+    for name, block in (project_data.get("providers") or {}).items():
+        if isinstance(block, dict) and block.get("api_key"):
+            found.append(f"providers.{name}.api_key")
+    if not found:
+        return []
+    return [
+        f"{path.name} holds an API key in plain text ({', '.join(found)}). Project files get committed "
+        "and shared; move the key out with 'flowai configure' and use api_key_env instead."
+    ]

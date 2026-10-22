@@ -80,12 +80,31 @@ async def test_list_glob_and_grep(workspace):
     assert "invalid regular expression" in await grep_files.execute(pattern="(")
 
 
-def test_python_repl_shares_one_namespace():
+@pytest.mark.asyncio
+async def test_python_repl_shares_one_namespace(workspace):
     # A comprehension referring to a module-level name broke with split globals/locals.
-    out = python_repl._fn("n = 3\nprint([i * n for i in range(3)])")
+    out = await python_repl.execute(code="n = 3\nprint([i * n for i in range(3)])")
     assert out == "[0, 3, 6]"
-    assert python_repl._fn("value = 6 * 7") == "value = 42"
-    assert "ZeroDivisionError" in python_repl._fn("print('before')\n1/0")
+    assert await python_repl.execute(code="value = 6 * 7") == "value = 42"
+    assert "ZeroDivisionError" in await python_repl.execute(code="print('before')\n1/0")
+
+
+@pytest.mark.asyncio
+async def test_python_and_shell_cannot_see_credentials(workspace, monkeypatch):
+    # Both run in child processes that start without credential variables.
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-should-never-reach-a-tool-0123456789")
+    monkeypatch.setenv("HARMLESS_SETTING", "visible")
+    out = await python_repl.execute(code="import os\nprint(os.environ.get('NVIDIA_API_KEY'), os.environ.get('HARMLESS_SETTING'))")
+    assert out == "None visible"
+    cmd = f'"{sys.executable}" -c "import os; print(os.environ.get(\'NVIDIA_API_KEY\'))"'
+    assert (await bash.execute(command=cmd)).strip() == "None"
+
+
+@pytest.mark.asyncio
+async def test_python_runs_outside_the_flowai_process(workspace):
+    # In-process code could import flowai and read the keys it holds.
+    out = await python_repl.execute(code="import sys\nprint('flowai.config' in sys.modules)")
+    assert out == "False"
 
 
 @pytest.mark.asyncio

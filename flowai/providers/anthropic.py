@@ -18,6 +18,7 @@ from flowai.providers.base import (
     StreamChunk,
     ToolCall,
 )
+from flowai.security.keystore import resolve_api_key
 
 
 class AnthropicProvider(BaseProvider):
@@ -34,7 +35,7 @@ class AnthropicProvider(BaseProvider):
         timeout: float = 60.0,
         **kwargs: Any,
     ):
-        resolved_key = api_key or os.getenv("ANTHROPIC_API_KEY", "")
+        resolved_key = api_key or resolve_api_key("ANTHROPIC_API_KEY")
         resolved_url = base_url or os.getenv("ANTHROPIC_BASE_URL", self.DEFAULT_BASE_URL)
         super().__init__(
             model=model,

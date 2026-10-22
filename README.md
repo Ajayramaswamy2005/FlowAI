@@ -2,9 +2,10 @@
 
 FlowAI is an AI agent you run in your terminal, in the same spirit as Claude
 Code or OpenCode. Bring your own key from Anthropic, OpenAI, NVIDIA, Google
-Gemini or OpenRouter, or run fully local with Ollama. The agent can read, search
-and edit the files in your project, run shell commands (after asking you), and
-search the web.
+Gemini or OpenRouter, or run fully local with Ollama or your own NVIDIA NIM.
+The agent can read, search and edit the files in your project, run shell
+commands (after asking you), and search the web, while a security layer keeps
+your API keys out of its reach.
 
 It is also a Python library: the same agents, tools, workflows and memory the
 CLI uses are yours to build on.
@@ -12,11 +13,8 @@ CLI uses are yours to build on.
 ## Install
 
 ```bash
-pip install flowai-cli        # once it is published to PyPI
+pip install flowai-cli
 pipx install flowai-cli       # same, in its own isolated environment
-
-# from a checkout of this repository:
-pip install .
 ```
 
 Python 3.10 or newer. The package is `flowai-cli` (the name `flowai` is taken on PyPI);
@@ -28,35 +26,107 @@ the command it installs is `flowai`, and the import is `import flowai`.
 flowai
 ```
 
-The first time, FlowAI asks for a provider and an API key and saves them to
-`~/.flowai/config.json`. After that, `flowai` opens a session in the current
-directory:
+The first time, FlowAI asks for a provider and an API key, stores the key in
+your operating system's credential store, and sends one tiny request to check
+it works. After that, `flowai` opens a session in the current directory.
+
+## The interface
+
+A FlowAI session is drawn as a current: every turn flows down one rail.
 
 ```
-------------------------------------------------------------
-  FlowAI 0.2.0   anthropic / claude-sonnet-5-5
-  workspace: /home/you/my-project
-  session:   ses_3f9a1c2e
-  /help for commands, /exit to quit
-------------------------------------------------------------
+  █▀▀ █   █▀█ █ █ █ ▄▀█ █   v0.3.0
+  █▀  █▄▄ █▄█ ▀▄▀▄▀ █▀█ █   an agent that moves with your code
+  ▅▇█▇▅▂▁▁▃▆▇█▇▅▂▁▁▃▆▇█▇▅▂▁▁▃▆██▇▅▂▁▁▃▆██▇▄▂▁▁▃▆
 
-> why does the test in tests/test_api.py fail?
+  model     nvidia › nvidia/nemotron-3.5-lightning-30b-a3b
+  workspace C:\Users\you\project
+  shield    armed · key in Windows Credential Manager · approvals ask
 
-  [tool] grep_files(pattern=def test_, path=tests)
-  [done] tests/test_api.py:12: def test_create_user(): (+4 more lines)
-  [tool] read_file(path=tests/test_api.py)
-  ...
+ ◆ fix the failing test in tests/test_api.py
+≋ undertow thought for 2.1s · 48 words   /think to read it
+◇ read_file  tests/test_api.py                                        0.0s  ✓ 120 lines
+◇ bash  pytest -q tests/test_api.py                                   1.9s  ✗ exit 1
+
+┃ GATE  edit_file  wants to run                                          risk LOW
+┃ src/api.py
+┃ - return a - b
+┃ + return a + b
+┃ [y] allow once (default)   [a] always allow edit_file   [n] deny
+● flowai
+│ The bug was a sign error in add(). All 12 tests pass now.
+╰─ 6.3s · 3 tools · 4.1k tok   tide ▂ 18%
 ```
 
-Set up non-interactively instead (for scripts or CI):
+- **◆** is your prompt. **≋ undertow** is the model's reasoning, folded to one
+  line (`/think` reads it in full, `/think on` shows it live).
+- **◇** is a tool call, with its timing and outcome.
+- The **gate** asks before anything risky runs. Its rail is coloured by risk,
+  it shows commands with syntax highlighting and edits as a diff, and it says
+  why a call is risky.
+- The answer is rendered markdown. While the model works, a swell of block
+  characters moves along the rail.
+- The **tide** gauge shows how full the model's context window is. The strip at
+  the bottom of the prompt shows the model, tide, tokens spent and shield state.
+- `/` completes commands. Esc then Enter adds a new line. Prompt history is
+  kept, with any pasted key masked.
 
-```bash
-flowai configure --provider anthropic --key "$ANTHROPIC_API_KEY"
-```
+Piped output, CI logs and `--plain` get plain text instead. `NO_COLOR` and
+`FLOWAI_NO_ANIM` are respected.
 
-Or skip configuration entirely: if `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
-`NVIDIA_API_KEY`, `GEMINI_API_KEY` or `OPENROUTER_API_KEY` is set, FlowAI uses
-it.
+## NVIDIA
+
+FlowAI works with every kind of NVIDIA key and endpoint:
+
+| You have | Do this |
+|---|---|
+| A key from build.nvidia.com (`nvapi-...`) | `flowai configure`, pick NVIDIA, paste it |
+| The key in an environment variable | Any of `NVIDIA_API_KEY`, `NVAPI_KEY`, `NGC_API_KEY`, `NIM_API_KEY` works |
+| A NIM running on your own machine or cluster | `NVIDIA_BASE_URL=http://localhost:8000/v1` (or `flowai configure --provider nvidia --base-url ...`); no key needed |
+
+The catalog's models do not all accept the same requests, and FlowAI adapts to
+each one:
+
+- **No tool support.** A model that refuses `tools` is sent the conversation
+  without them, and you are told so. The same goes for `stream_options`, the
+  `system` role and `max_tokens`. Any chat model on the catalog can be used.
+- **Reasoning models** (Nemotron, DeepSeek, GPT-OSS) stream their thinking
+  separately, whether it arrives as `reasoning_content` or inside `<think>` tags.
+- **Model names.** A bare name such as `glm-5.3-flash` is resolved to its
+  catalog id (`z-ai/glm-5.3-flash`).
+- **Unavailable models.** Some models are listed but not available to every
+  account, and retired ones answer 410. FlowAI then suggests models your key
+  can call, and `flowai configure` finds a working one for you.
+- **Rate limits.** The free tier's limits are retried with backoff,
+  honouring `Retry-After`.
+- **Key mistakes** are named: a key without the `nvapi-` prefix (an old NGC
+  key cannot call the hosted API), or stray whitespace around it.
+
+`flowai models nvidia [filter]` lists the catalog. In a session, `/models` does
+the same, and `/model <id>` switches without losing the conversation.
+
+## Security
+
+An agent that runs commands on your machine is an obvious target. Someone
+would like it to read your API key and send it somewhere, usually by hiding
+instructions in a file or web page the agent reads. FlowAI defends in layers:
+
+| Layer | What it does |
+|---|---|
+| Key vault | Keys live in Windows Credential Manager, the macOS Keychain or the Secret Service. Without one, they go in a file only your user can read. Keys are never copied into the environment |
+| Scrubbed children | `bash`, `python_repl` and MCP servers start with every credential-looking variable removed. Python runs in a separate process, so it cannot reach into FlowAI's memory |
+| Redaction | Every key FlowAI knows, plus the shapes of common keys (`nvapi-`, `sk-`, `sk-ant-`, `AIza`, `ghp_`...), is masked in tool output before the model sees it. That includes base64, hex, reversed and URL-encoded forms. Transcripts, prompt history and errors are masked too |
+| Tripwires | Dumping the environment, reading `.env`, SSH keys, the credential store or FlowAI's own config always asks you, even with `--yolo`. With no terminal attached, the answer is no |
+| Exfiltration block | A call that reads secrets and sends data over the network in one go is refused outright, as is any tool call whose arguments contain a key |
+| Network guard | `fetch_url` refuses localhost, private networks and cloud metadata addresses, checking every redirect |
+| Injection fence | Web and MCP output is wrapped as untrusted data, and the system prompt tells the model to treat it that way |
+| Terminal hygiene | Escape sequences are stripped from everything drawn, so a page cannot rewrite your clipboard or hide text |
+| Server | `flowai serve` requires a bearer token, refuses non-local `Host` headers (DNS rebinding), and runs no shell tools unless started with `--allow-shell` |
+
+`flowai shield` audits your setup and says what to fix. `flowai shield --fix`
+moves plain-text keys into the keyring and locks the config directory, and
+`flowai logout` deletes a saved key. These are tripwires, not a sandbox: read
+[SECURITY.md](SECURITY.md) for what they do not cover.
 
 ## Commands
 
@@ -68,46 +138,52 @@ it.
 | `flowai run -q "..."` | One task, print only the final answer (good for scripts) |
 | `echo "..." \| flowai run` | Read the prompt from stdin |
 | `flowai configure` | Choose provider, model and API key |
+| `flowai models [provider] [filter]` | List the models a provider serves |
+| `flowai shield [--fix]` | Audit how your keys are protected |
+| `flowai logout [provider]` | Delete a saved key |
 | `flowai init [dir]` | Create a `flowai.yaml` and a starter `main.py` |
 | `flowai inspect` | Show config status, saved sessions, checkpoints |
 | `flowai tools` | List the built-in tools |
 | `flowai serve` | HTTP API with streaming (`pip install 'flowai-cli[server]'`) |
 
 Options for `chat` and `run`: `--provider`, `--model`, `-w/--workspace DIR`,
-`--yolo` (do not ask before shell/python tools run), `--no-tools`,
-`--max-iterations N`.
+`--yolo` (do not ask before shell/python run; secret access still asks),
+`--no-tools`, `--max-iterations N`, `--plain`.
 
-Inside a session: `/help`, `/model <name>`, `/provider <name> [model]`,
-`/tools`, `/cost`, `/new`, `/reset`, `/yolo`, `/exit`.
+Inside a session: `/help`, `/model <id>`, `/models [filter]`,
+`/provider <name> [model]`, `/tools`, `/think [on|off]`, `/cost`, `/shield`,
+`/new`, `/reset`, `/clear`, `/yolo`, `/exit`.
 
 ## What the agent can do
 
 | Tool | Notes |
 |---|---|
-| `read_file`, `list_dir`, `glob_files`, `grep_files` | Read-only; never asks |
-| `write_file`, `edit_file` | Changes files inside the workspace only |
+| `read_file`, `list_dir`, `glob_files`, `grep_files` | Read-only; never ask, except for files that hold secrets |
+| `write_file`, `edit_file` | Change files inside the workspace only |
 | `bash` | Asks first. Runs in the workspace, 120 s timeout |
-| `python_repl` | Asks first. Runs code in a fresh namespace |
-| `search_web`, `fetch_url` | DuckDuckGo search and page fetch |
+| `python_repl` | Asks first. Runs in a separate interpreter, 60 s timeout |
+| `search_web`, `fetch_url` | DuckDuckGo search and public page fetch |
 
-**Safety.** Every file path is resolved against the workspace (the directory
-you started in, or `-w`) and refused if it points outside. Shell, Python and
-MCP tools show you exactly what they will run and wait for `y`, `n` or `a`
-(always, for that tool, this session). With no terminal attached, those tools
-are refused rather than run. `--yolo` or `approval: "auto"` in `flowai.yaml`
-turns the prompt off; use it only in a sandbox.
+Every file path is resolved against the workspace (the directory you started
+in, or `-w`) and refused if it points outside.
 
 ## Configuration
 
 Settings are layered, later wins:
 
-1. `~/.flowai/config.json`, written by `flowai configure`
+1. `~/.flowai/config.json`, written by `flowai configure` (keys themselves go
+   to the OS keyring)
 2. `flowai.yaml` (or `.yml`, `.toml`, `.json`) in the current directory or any
    parent, so it works from a subdirectory of your project
 3. Environment: `FLOWAI_PROVIDER`, `FLOWAI_MODEL`, and the provider key variables
 
 See [flowai.yaml](flowai.yaml) for every option, including `mcp_servers` for
 borrowing tools from Model Context Protocol servers (`pip install 'flowai-cli[mcp]'`).
+Never put a key in `flowai.yaml`; `flowai shield` flags it if you do.
+
+`FLOWAI_HOME` moves `~/.flowai`. `FLOWAI_PASS_ENV=GITHUB_TOKEN,...` hands
+named variables to the agent's shell on purpose. `FLOWAI_KEYRING=0` turns
+the keyring off.
 
 ## Using it as a library
 
@@ -122,17 +198,19 @@ def compound_interest(principal: float, rate: float, years: int) -> float:
 
 agent = Agent(
     name="Advisor",
-    provider="anthropic",          # nvidia, ollama, openai, gemini, openrouter
-    model="claude-sonnet-5-5",
+    provider="nvidia",             # anthropic, ollama, openai, gemini, openrouter
+    model="nvidia/nemotron-3.5-lightning-30b-a3b",
     tools=[compound_interest],
 )
 
 print(asyncio.run(agent.run("What will $5,000 be after 10 years at 8%?")))
 ```
 
-`agent.stream(prompt)` yields tokens as they arrive and runs tool calls along
-the way. Tools you register in your own code run without an approval prompt
-(you wrote them); give a `ToolRegistry` an `approver` callback to change that.
+`agent.stream(prompt)` yields tokens as they arrive (and `reasoning_delta` for
+reasoning models) and runs tool calls along the way. Tools you register in
+your own code run without an approval prompt (you wrote them). To change that,
+give a `ToolRegistry` an `approver` callback; to add the CLI's protections,
+give it a `shield=Shield()` (`from flowai.security import Shield`).
 
 Beyond a single agent the library has:
 
@@ -155,16 +233,14 @@ pytest
 ruff check flowai tests
 ```
 
-The tests are offline: providers are faked at the HTTP layer, so no key is needed.
+The tests are offline: providers are faked at the HTTP layer, so no key is
+needed, and they never touch your real keyring.
 
 ## Releasing to PyPI
 
 1. Bump `version` in `pyproject.toml` and `__version__` in `flowai/__init__.py`.
-2. Push a tag `flowai-vX.Y.Z`. The `flowai-release` workflow builds this
-   directory and publishes it with PyPI Trusted Publishing; configure the
-   `flowai-cli` project on PyPI to trust this repository and workflow first.
-
-
+2. Push a tag `flowai-vX.Y.Z`. The `flowai-release` workflow builds the
+   package and publishes it with PyPI Trusted Publishing.
 
 ## License
 

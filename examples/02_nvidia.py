@@ -1,4 +1,10 @@
-"""Example 02: NVIDIA API Catalog with DeepSeek-R1 / DeepSeek-V4."""
+"""Example 02: an agent on NVIDIA's API catalog, with streamed reasoning.
+
+Needs an NVIDIA key in any of NVIDIA_API_KEY, NVAPI_KEY, NGC_API_KEY or
+NIM_API_KEY (or saved with `flowai configure`). For a NIM you run yourself,
+set NVIDIA_BASE_URL=http://localhost:8000/v1 instead; no key is needed.
+List the models your key can use with: flowai models nvidia
+"""
 
 import asyncio
 
@@ -12,16 +18,15 @@ def check_server_health(host: str) -> dict:
 
 
 async def main():
-    # Make sure NVIDIA_API_KEY is set in your environment
     agent = Agent(
-        name="NvidiaDeepSeekAgent",
+        name="NvidiaAgent",
         provider="nvidia",
-        model="deepseek-ai/deepseek-r1",
+        model="nvidia/nemotron-3.5-lightning-30b-a3b",
         system_prompt="You are a DevOps autonomous triage engineer.",
         tools=[check_server_health],
     )
 
-    print("=== Invoking DeepSeek on NVIDIA API Catalog ===")
+    print("=== NVIDIA API catalog ===")
     prompt = "Check the health of 'prod-cluster-us-east-1' and summarize your findings."
 
     # Non-streaming invocation
@@ -29,9 +34,11 @@ async def main():
     print("\n--- Agent Conclusion ---")
     print(result)
 
-    # Token streaming invocation
+    # Streaming: reasoning models send their thinking separately from the answer.
     print("\n--- Streaming Response ---")
     async for chunk in agent.stream("Recommend 2 optimization actions."):
+        if chunk.reasoning_delta:
+            print(f"\033[2m{chunk.reasoning_delta}\033[0m", end="", flush=True)
         print(chunk.text_delta, end="", flush=True)
     print()
 

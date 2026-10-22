@@ -30,6 +30,8 @@ class BaseTool(ABC):
     is_async: bool = False
     # Tools that change the machine (shell, arbitrary code) ask before running.
     requires_approval: bool = False
+    # Tools from outside FlowAI (MCP servers); their output is treated as untrusted.
+    external: bool = False
 
     @abstractmethod
     async def execute(self, **kwargs: Any) -> Any:

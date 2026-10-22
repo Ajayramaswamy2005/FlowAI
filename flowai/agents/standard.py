@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -55,9 +56,14 @@ class Agent(BaseAgent):
         """Execute every requested tool call and append its result to the transcript."""
         for tc in tool_calls:
             await self.event_bus.publish("tool_start", {"tool": tc.name, "arguments": tc.arguments})
+            started = time.perf_counter()
             output = await self.tools.execute(tc.name, **tc.arguments)
             output_str = output if isinstance(output, str) else str(output)
-            await self.event_bus.publish("tool_end", {"tool": tc.name, "result": output_str})
+            await self.event_bus.publish("tool_end", {
+                "tool": tc.name,
+                "result": output_str,
+                "seconds": time.perf_counter() - started,
+            })
             self.messages.append(
                 Message(role="tool", name=tc.name, tool_call_id=tc.id, content=output_str)
             )
@@ -153,6 +159,8 @@ class Agent(BaseAgent):
                 yield chunk
 
             reply_text = "".join(text_parts)
+            # A provider may correct the model id mid-call (NVIDIA's bare-name lookup).
+            self.model = self.provider.model or self.model
 
             if not tool_calls:
                 if reply_text:

@@ -11,6 +11,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from flowai.errors import ConfigurationError, ProviderError
+from flowai.security.secrets import redact
 
 
 class ToolCall(BaseModel):
@@ -48,6 +49,8 @@ class ProviderUsage(BaseModel):
 class ProviderResponse(BaseModel):
     """Standard non-streaming completion output."""
     content: str = ""
+    #: The model's visible chain of thought, for reasoning models that expose one.
+    reasoning: str = ""
     tool_calls: list[ToolCall] = Field(default_factory=list)
     finish_reason: str = "stop"
     usage: ProviderUsage = Field(default_factory=ProviderUsage)
@@ -56,7 +59,11 @@ class ProviderResponse(BaseModel):
 class StreamChunk(BaseModel):
     """Incremental chunk emitted during streaming."""
     text_delta: str = ""
+    #: Reasoning ("thinking") text, shown to the user but never sent back to the model.
+    reasoning_delta: str = ""
     tool_call_delta: ToolCall | None = None
+    #: Something the user should know, e.g. "this model cannot call tools; continuing without them".
+    notice: str | None = None
     finish_reason: str | None = None
     usage: ProviderUsage | None = None
 
@@ -128,6 +135,10 @@ class BaseProvider(ABC):
         """Compute text vector embeddings."""
         ...
 
+    async def list_models(self) -> list[str]:
+        """Model ids this provider serves, for `flowai models`."""
+        raise ConfigurationError(f"Listing models is not supported for the {self.provider_name} provider.")
+
     @property
     def provider_name(self) -> str:
         """Short lowercase name, e.g. 'anthropic' for AnthropicProvider."""
@@ -162,7 +173,13 @@ class BaseProvider(ABC):
             pass
         if len(detail) > 500:
             detail = detail[:500] + "..."
-        raise ProviderError(self.provider_name, response.status_code, detail or response.reason_phrase)
+        # Some APIs echo the rejected key back in the error; never print it.
+        detail = redact(detail or response.reason_phrase)
+        raise self._explain_error(ProviderError(self.provider_name, response.status_code, detail))
+
+    def _explain_error(self, error: ProviderError) -> ProviderError:
+        """Hook for providers to add a hint to a raw API error."""
+        return error
 
     def parse_tool_call(self, raw_call: dict[str, Any]) -> ToolCall:
         """Helper to safely parse tool call dictionary into ToolCall object."""

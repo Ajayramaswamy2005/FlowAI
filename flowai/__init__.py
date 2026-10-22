@@ -1,6 +1,6 @@
 """FlowAI: An open-source, production-ready, extensible Python Agent Harness."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from flowai.agents import (
     Agent,
