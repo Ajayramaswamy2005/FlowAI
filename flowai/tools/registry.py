@@ -5,12 +5,16 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from flowai.security.policy import Risk
+from flowai.security.secrets import sanitize_terminal
 from flowai.security.shield import Shield
 from flowai.tools.base import BaseTool
 from flowai.tools.decorator import tool
+
+if TYPE_CHECKING:
+    from flowai.plugins.hooks import HookManager
 
 # Called with (tool_name, arguments) or (tool_name, arguments, risk); return False to refuse.
 Approver = Callable[..., Any]
@@ -39,6 +43,10 @@ class ToolRegistry:
     A registry with a `shield` also grades every call (blocking the ones that
     would leak a credential, asking about the dangerous ones) and cleans every
     result before the model sees it. See flowai.security.shield.
+
+    A registry with `hooks` runs plugins' pre_tool hooks before the shield
+    grades a call (so rewritten arguments are graded too) and post_tool hooks
+    after the shield cleaned the result (which is then cleaned again).
     """
 
     def __init__(
@@ -46,11 +54,13 @@ class ToolRegistry:
         tools: Sequence[BaseTool | Callable[..., Any]] | None = None,
         approver: Approver | None = None,
         shield: Shield | None = None,
+        hooks: HookManager | None = None,
     ):
         self._tools: dict[str, BaseTool] = {}
         self._builtin: set[str] = set()
         self.approver = approver
         self.shield = shield
+        self.hooks = hooks
         if tools:
             for t in tools:
                 self.register(t)
@@ -106,6 +116,17 @@ class ToolRegistry:
                 f"Error: tool '{tool_name}' does not exist. "
                 f"Available tools: {', '.join(self._tools) or '(none)'}"
             )
+        ctx = None
+        if self.hooks:
+            from flowai.plugins.hooks import ToolCallContext
+
+            ctx = await self.hooks.run("pre_tool", ToolCallContext(tool=tool_name, arguments=dict(kwargs)))
+            if ctx.blocked:
+                return f"Stopped by a FlowAI plugin: {ctx.reason}. This call was not run; do not retry it."
+            if not isinstance(ctx.arguments, dict):
+                return f"Stopped by a FlowAI plugin: a pre_tool hook replaced the arguments of {tool_name} with a non-dict."
+            kwargs = ctx.arguments
+
         builtin = tool_name in self._builtin
         risk = self.shield.assess(tool_name, kwargs, builtin=builtin) if self.shield else None
         if risk is not None and risk.blocked:
@@ -116,7 +137,16 @@ class ToolRegistry:
             result = await tool_instance.execute(**kwargs)
         except Exception as exc:
             result = f"Error executing {tool_name}: {type(exc).__name__}: {exc}"
-        if self.shield is None:
-            return result
-        text = result if isinstance(result, str) else str(result)
-        return self.shield.filter_output(tool_name, text, builtin=builtin)
+        if self.shield is not None:
+            text = result if isinstance(result, str) else str(result)
+            result = self.shield.filter_output(tool_name, text, builtin=builtin)
+
+        if ctx is not None and self.hooks.hooks("post_tool"):
+            ctx.result = result if isinstance(result, str) else str(result)
+            await self.hooks.run("post_tool", ctx)
+            if ctx.result is not None:
+                result = str(ctx.result)
+                if self.shield is not None:
+                    # A hook could have added anything; it gets the same cleaning as tool output.
+                    result = sanitize_terminal(self.shield.redactor.redact(result))
+        return result

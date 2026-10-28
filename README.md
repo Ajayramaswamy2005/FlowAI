@@ -35,7 +35,7 @@ it works. After that, `flowai` opens a session in the current directory.
 A FlowAI session is drawn as a current: every turn flows down one rail.
 
 ```
-  █▀▀ █   █▀█ █ █ █ ▄▀█ █   v0.3.0
+  █▀▀ █   █▀█ █ █ █ ▄▀█ █   v0.4.0
   █▀  █▄▄ █▄█ ▀▄▀▄▀ █▀█ █   an agent that moves with your code
   ▅▇█▇▅▂▁▁▃▆▇█▇▅▂▁▁▃▆▇█▇▅▂▁▁▃▆██▇▅▂▁▁▃▆██▇▄▂▁▁▃▆
 
@@ -119,7 +119,9 @@ instructions in a file or web page the agent reads. FlowAI defends in layers:
 | Tripwires | Dumping the environment, reading `.env`, SSH keys, the credential store or FlowAI's own config always asks you, even with `--yolo`. With no terminal attached, the answer is no |
 | Exfiltration block | A call that reads secrets and sends data over the network in one go is refused outright, as is any tool call whose arguments contain a key |
 | Network guard | `fetch_url` refuses localhost, private networks and cloud metadata addresses, checking every redirect |
-| Injection fence | Web and MCP output is wrapped as untrusted data, and the system prompt tells the model to treat it that way |
+| Injection fence | Web and MCP output is wrapped as untrusted data, and the system prompt tells the model to treat it that way. Tool output that tries to give the model orders ("ignore your previous instructions", fake `<\|im_start\|>` turns) is flagged, and invisible Unicode that can hide text from you is stripped |
+| Guardrails | Jailbreak and system-prompt extraction attempts are caught even when disguised (`i g n o r e`, zero-width or look-alike letters, invisible tag characters) or split across several messages. The model is reminded of its rules (`jailbreak: guard`) or the prompt is refused (`block`, the default for `flowai serve`). A key you paste into a prompt is masked before it reaches the provider, replies are redacted as they stream, and a model stuck repeating one tool call is stopped |
+| Project files | A cloned repo's `flowai.yaml` may tighten security but never loosen it: `approval: auto` and weaker guardrails are ignored, and an MCP server it defines starts only after you approve that exact command |
 | Terminal hygiene | Escape sequences are stripped from everything drawn, so a page cannot rewrite your clipboard or hide text |
 | Server | `flowai serve` requires a bearer token, refuses non-local `Host` headers (DNS rebinding), and runs no shell tools unless started with `--allow-shell` |
 
@@ -140,6 +142,7 @@ moves plain-text keys into the keyring and locks the config directory, and
 | `flowai configure` | Choose provider, model and API key |
 | `flowai models [provider] [filter]` | List the models a provider serves |
 | `flowai shield [--fix]` | Audit how your keys are protected |
+| `flowai plugins` | List plugins, their tools and hooks, and any that failed to load |
 | `flowai logout [provider]` | Delete a saved key |
 | `flowai init [dir]` | Create a `flowai.yaml` and a starter `main.py` |
 | `flowai inspect` | Show config status, saved sessions, checkpoints |
@@ -148,11 +151,11 @@ moves plain-text keys into the keyring and locks the config directory, and
 
 Options for `chat` and `run`: `--provider`, `--model`, `-w/--workspace DIR`,
 `--yolo` (do not ask before shell/python run; secret access still asks),
-`--no-tools`, `--max-iterations N`, `--plain`.
+`--no-tools`, `--max-iterations N`, `--plain`, `--no-plugins`.
 
 Inside a session: `/help`, `/model <id>`, `/models [filter]`,
 `/provider <name> [model]`, `/tools`, `/think [on|off]`, `/cost`, `/shield`,
-`/new`, `/reset`, `/clear`, `/yolo`, `/exit`.
+`/plugins`, `/new`, `/reset`, `/clear`, `/yolo`, `/exit`.
 
 ## What the agent can do
 
@@ -166,6 +169,61 @@ Inside a session: `/help`, `/model <id>`, `/models [filter]`,
 
 Every file path is resolved against the workspace (the directory you started
 in, or `-w`) and refused if it points outside.
+
+## Plugins and hooks
+
+A plugin adds tools and hooks. Hooks run at five points, each with a context
+the hook may change or block:
+
+| Hook | Runs | Context fields |
+|---|---|---|
+| `pre_prompt` | before your prompt reaches the model | `prompt`, `block(reason)` |
+| `post_response` | after the final answer | `prompt`, `reply` |
+| `pre_tool` | before a tool call runs | `tool`, `arguments`, `block(reason)` |
+| `post_tool` | after a tool call ran | `tool`, `arguments`, `result` |
+| `on_error` | when a turn fails | `error` |
+
+```python
+# ~/.flowai/plugins/house_rules.py
+from flowai.plugins import Plugin
+from flowai.tools import tool
+
+class HouseRules(Plugin):
+    name = "house-rules"
+
+    def pre_tool(self, ctx):
+        if ctx.tool == "bash" and "docker" in ctx.arguments.get("command", ""):
+            ctx.block("docker is off limits in this project")
+
+    def post_tool(self, ctx):
+        with open("audit.log", "a") as log:
+            log.write(f"{ctx.tool} {ctx.arguments}\n")
+
+    def tools(self):
+        @tool
+        def word_count(text: str) -> int:
+            "Count the words in a piece of text."
+            return len(text.split())
+        return [word_count]
+```
+
+Put the file in `~/.flowai/plugins/`, or ship it as a package with an entry
+point in the `flowai.plugins` group. `flowai plugins` shows what loaded.
+
+Plugins cannot weaken the shield, and a broken one cannot break the agent:
+
+- `pre_tool` runs *before* the shield grades a call, so arguments a hook
+  rewrites are checked like any others; `post_tool` output is redacted again.
+- A `pre_*` hook that raises blocks what it guarded (fail closed). A `post_*`
+  or `on_error` hook that raises is skipped. A plugin that fails to load is
+  reported and the rest load anyway.
+- Plugin tools cannot replace built-in tools such as `bash` or `read_file`.
+- Plugins never load from the project directory, so opening a cloned repo
+  cannot run its code. Turn them off with `--no-plugins`, `FLOWAI_NO_PLUGINS=1`,
+  or `disabled_plugins: [name]` in your config.
+
+In the library, pass `hooks=HookManager()` to an `Agent`, and register with
+`hooks.register("pre_tool", fn)` or the `@hooks.on("pre_tool")` decorator.
 
 ## Configuration
 
@@ -221,7 +279,8 @@ Beyond a single agent the library has:
 - **Memory**: `InMemory`, `QdrantMemory` (`flowai-cli[qdrant]`), `ChromaMemory` (`flowai-cli[chroma]`)
 - **Observability**: per-span token counts and estimated cost (`agent.tracer`),
   an event bus, and an OpenTelemetry exporter (`flowai-cli[observability]`)
-- **Plugins**: third-party providers via the `flowai.plugins` entry point
+- **Plugins and hooks**: custom tools, providers and pre/post hooks (see above)
+- **Guardrails**: `Agent(guardrails=Guardrails(jailbreak="block"))`, or `guardrails=False` to switch them off
 
 Runnable examples are in [examples/](examples/).
 

@@ -1,5 +1,6 @@
-"""Security: key storage, secret redaction and the tool-call shield."""
+"""Security: key storage, secret redaction, guardrails and the tool-call shield."""
 
+from flowai.security.guardrails import Guardrails, find_injection, find_jailbreak
 from flowai.security.keystore import (
     flowai_home,
     forget_key,
@@ -22,11 +23,14 @@ from flowai.security.shield import Shield
 
 __all__ = [
     "REDACTOR",
+    "Guardrails",
     "Redactor",
     "Risk",
     "Shield",
     "assess_command",
     "assess_python",
+    "find_injection",
+    "find_jailbreak",
     "flowai_home",
     "forget_key",
     "key_location",

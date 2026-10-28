@@ -83,6 +83,17 @@ class ServerConfig(BaseModel):
     workers: int = 1
 
 
+class GuardrailConfig(BaseModel):
+    """What the guardrails do with prompts and replies (see flowai.security.guardrails)."""
+    #: "guard" reminds the model of its rules, "block" refuses the prompt, "off" does nothing.
+    jailbreak: str = "guard"
+    #: Mask API keys pasted into a prompt before it is sent to the provider.
+    redact_prompt_secrets: bool = True
+    max_prompt_chars: int = 400_000
+    #: The same tool with the same arguments, more often than this in one turn, is refused. 0 = no limit.
+    max_identical_tool_calls: int = 3
+
+
 class MCPServerConfig(BaseModel):
     """An MCP server to start and borrow tools from."""
     command: str
@@ -104,6 +115,12 @@ class Settings(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+    guardrails: GuardrailConfig = Field(default_factory=GuardrailConfig)
+    #: Plugins (by name) not to load.
+    disabled_plugins: list[str] = Field(default_factory=list)
+    #: MCP servers defined by the project file rather than by the user; they need the user's trust to start.
+    project_mcp_servers: list[str] = Field(default_factory=list, exclude=True, repr=False)
+    project_file: str | None = Field(default=None, exclude=True, repr=False)
     #: Things the user should know about their setup (a key in a project file, say).
     notices: list[str] = Field(default_factory=list, exclude=True, repr=False)
 
@@ -116,13 +133,17 @@ class Settings(BaseModel):
 
         data.update(cls._load_global())
         project_data, project_path = cls._load_project(config_path)
-        data.update(project_data)
+        restricted, trust_notices = _restrict_project(project_data, data, project_path)
+        data.update(restricted)
         if project_path and "project_name" not in project_data:
             data["project_name"] = project_path.parent.name
         cls._apply_environment(data)
 
         settings = cls(**data)
         if project_path:
+            settings.project_file = str(project_path)
+            settings.project_mcp_servers = sorted((project_data.get("mcp_servers") or {}).keys())
+            settings.notices += trust_notices
             settings.notices += _plaintext_key_notices(project_data, project_path)
         settings._register_secrets()
         return settings
@@ -263,3 +284,59 @@ def _plaintext_key_notices(project_data: dict[str, Any], path: Path) -> list[str
         f"{path.name} holds an API key in plain text ({', '.join(found)}). Project files get committed "
         "and shared; move the key out with 'flowai configure' and use api_key_env instead."
     ]
+
+
+_JAILBREAK_STRICTNESS = {"off": 0, "guard": 1, "block": 2}
+
+
+def _restrict_project(
+    project: dict[str, Any], user: dict[str, Any], path: Path | None
+) -> tuple[dict[str, Any], list[str]]:
+    """Let a project file tighten security settings but never loosen them.
+
+    A project file arrives with whatever repository you cloned, so it is not
+    allowed to switch approvals off, weaken the guardrails or re-enable a
+    plugin you disabled. Those settings belong in ~/.flowai/config.json.
+    """
+    if not project:
+        return project, []
+    data = dict(project)
+    notices: list[str] = []
+    name = path.name if path else "the project file"
+    loosen = f"{name} tries to {{what}}; ignored, because project files may tighten security but not loosen it."
+
+    if str(data.get("approval", "ask")).lower() == "auto" and str(user.get("approval", "ask")).lower() != "auto":
+        data.pop("approval")
+        notices.append(loosen.format(what="turn approvals off (approval: auto)")
+                       + " Use --yolo for one session if you mean it.")
+
+    if "guardrails" in data:
+        theirs = data.pop("guardrails")
+        mine = GuardrailConfig(**(user.get("guardrails") or {}))
+        merged = mine.model_dump()
+        refused: list[str] = []
+        if isinstance(theirs, dict):
+            mode = theirs.get("jailbreak")
+            if mode is not None:
+                if _JAILBREAK_STRICTNESS.get(str(mode), -1) >= _JAILBREAK_STRICTNESS[mine.jailbreak]:
+                    merged["jailbreak"] = mode
+                else:
+                    refused.append(f"jailbreak: {mode}")
+            if theirs.get("redact_prompt_secrets") is False and mine.redact_prompt_secrets:
+                refused.append("redact_prompt_secrets: false")
+            for key in ("max_prompt_chars", "max_identical_tool_calls"):
+                value = theirs.get(key)
+                if value is None:
+                    continue
+                current = merged[key]
+                if isinstance(value, int) and 0 < value and (current == 0 or value <= current):
+                    merged[key] = value
+                else:
+                    refused.append(f"{key}: {value}")
+        data["guardrails"] = merged
+        if refused:
+            notices.append(loosen.format(what=f"weaken the guardrails ({', '.join(refused)})"))
+
+    if "disabled_plugins" in data:
+        data["disabled_plugins"] = sorted({*(user.get("disabled_plugins") or []), *(data["disabled_plugins"] or [])})
+    return data, notices

@@ -265,19 +265,6 @@ class OpenAIProvider(BaseProvider):
         notices, self._notices = self._notices, []
         return notices
 
-    def _transport_error(self, exc: httpx.HTTPError) -> ProviderError:
-        """Name a network failure; httpx timeouts stringify to an empty message."""
-        if isinstance(exc, httpx.TimeoutException):
-            message = (
-                f"no response from {self.base_url} within {self.timeout:.0f}s. The model may be busy "
-                "or slow to start; try again, or pick a faster one."
-            )
-        elif isinstance(exc, httpx.ConnectError):
-            message = f"could not connect to {self.base_url} ({exc or type(exc).__name__})."
-        else:
-            message = f"{type(exc).__name__}: {exc}"
-        return ProviderError(self.provider_name, None, message)
-
     # ------------------------------------------------------------- calls
 
     async def generate(

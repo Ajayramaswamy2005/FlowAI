@@ -177,6 +177,20 @@ class BaseProvider(ABC):
         detail = redact(detail or response.reason_phrase)
         raise self._explain_error(ProviderError(self.provider_name, response.status_code, detail))
 
+    def _transport_error(self, exc: httpx.HTTPError) -> ProviderError:
+        """Name a network failure; httpx timeouts stringify to an empty message."""
+        if isinstance(exc, httpx.TimeoutException):
+            message = (
+                f"no response from {self.base_url} within {self.timeout:.0f}s. The model may be busy "
+                "or slow to start; try again, or pick a faster one."
+            )
+        elif isinstance(exc, httpx.ConnectError):
+            message = f"could not connect to {self.base_url} ({exc or type(exc).__name__})."
+        else:
+            message = f"{type(exc).__name__}: {exc}"
+        # A request URL can carry a key (Gemini's ?key=); never print it.
+        return ProviderError(self.provider_name, None, redact(message))
+
     def _explain_error(self, error: ProviderError) -> ProviderError:
         """Hook for providers to add a hint to a raw API error."""
         return error

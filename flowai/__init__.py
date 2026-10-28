@@ -1,6 +1,6 @@
 """FlowAI: An open-source, production-ready, extensible Python Agent Harness."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from flowai.agents import (
     Agent,
@@ -24,6 +24,7 @@ from flowai.memory import (
     ShortTermMemory,
 )
 from flowai.observability import EventBus, StreamEvent, Tracer
+from flowai.plugins import HookManager, Plugin
 from flowai.providers import (
     BaseProvider,
     Message,
@@ -32,6 +33,7 @@ from flowai.providers import (
     ToolCall,
     ToolResult,
 )
+from flowai.security.guardrails import Guardrails
 from flowai.tools import BaseTool, ToolRegistry, tool
 from flowai.workflow import END, START, AgentState, Workflow
 
@@ -69,4 +71,7 @@ __all__ = [
     "Tracer",
     "EventBus",
     "StreamEvent",
+    "Plugin",
+    "HookManager",
+    "Guardrails",
 ]

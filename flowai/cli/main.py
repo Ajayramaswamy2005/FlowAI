@@ -2,7 +2,7 @@
 
     flowai                          start an interactive session (runs setup first if needed)
     flowai "fix the failing test"   run one prompt and exit
-    flowai configure | init | run | chat | models | shield | logout | serve | inspect | tools
+    flowai configure | init | run | chat | models | shield | plugins | logout | serve | inspect | tools
 """
 
 from __future__ import annotations
@@ -26,15 +26,18 @@ from flowai.config.settings import (
     provider_key_envs,
 )
 from flowai.errors import FlowAIError, ProviderError
+from flowai.plugins.loader import PluginLoader, PluginSet, plugins_dir
 from flowai.providers.base import Message
 from flowai.providers.registry import ProviderRegistry, get_provider
-from flowai.security import keystore
+from flowai.security import keystore, trust
+from flowai.security.guardrails import Guardrails
+from flowai.security.policy import Risk
 from flowai.security.secrets import REDACTOR, redact, register_secret, sanitize_terminal
 from flowai.security.shield import Shield
 from flowai.tools.builtin import default_system_prompt, default_toolset
 from flowai.tools.registry import ToolRegistry
 
-SUBCOMMANDS = {"configure", "init", "run", "chat", "serve", "inspect", "tools", "models", "shield", "logout"}
+SUBCOMMANDS = {"configure", "init", "run", "chat", "serve", "inspect", "tools", "models", "shield", "plugins", "logout"}
 
 PROVIDER_MENU = [
     ("anthropic", "Anthropic (Claude)"),
@@ -54,6 +57,7 @@ CHAT_COMMANDS = {
     "/think": "read the last answer's reasoning; /think on|off shows it live",
     "/cost": "tokens used and estimated cost this session",
     "/shield": "what protects your keys right now",
+    "/plugins": "loaded plugins, their tools and hooks, and any that failed",
     "/new": "start a fresh session",
     "/reset": "clear the conversation, keep the session id",
     "/clear": "clear the screen",
@@ -128,6 +132,8 @@ def load_mcp_tools(cfg: Settings, view) -> list:
 
     tools: list = []
     for name, server in servers.items():
+        if name in cfg.project_mcp_servers and not mcp_server_allowed(cfg, name, server, view):
+            continue
         try:
             client = MCPClient(server.command, server.args, server.env)
             found = asyncio.run(client.connect_and_discover_tools())
@@ -136,6 +142,41 @@ def load_mcp_tools(cfg: Settings, view) -> list:
         except Exception as exc:  # a broken server must not stop the session
             view.notice(f"MCP '{name}' failed to start: {exc}")
     return tools
+
+
+def mcp_server_allowed(cfg: Settings, name: str, server, view) -> bool:
+    """A server defined by the project file starts only once the user approved that exact command."""
+    project_file = cfg.project_file or "project file"
+    if trust.is_trusted(project_file, name, server):
+        return True
+    command = " ".join([server.command, *server.args])
+    if not ui.stdin_is_terminal():
+        view.notice(f"MCP '{name}' not started: {Path(project_file).name} defines it, and there is no terminal "
+                    "to ask whether you trust it. Run flowai interactively once to approve it.")
+        return False
+    risk = Risk("high", [f"defined by {project_file}, not by you", "starts a program on this machine"])
+    verdict = view.gate(f"mcp server '{name}'", {"command": command}, risk)
+    if asyncio.iscoroutine(verdict):
+        verdict = asyncio.run(verdict)
+    if verdict == "always":
+        trust.trust(project_file, name, server)
+    if verdict in ("yes", "always"):
+        return True
+    view.info(f"MCP '{name}' not started.")
+    return False
+
+
+def load_plugins(args: argparse.Namespace, cfg: Settings, view, existing: set[str]) -> PluginSet:
+    """Load the user's plugins. A plugin that fails is reported and skipped, never fatal."""
+    if getattr(args, "no_plugins", False):
+        return PluginSet(skipped=["all plugins (--no-plugins)"])
+    loaded = PluginLoader(disabled=cfg.disabled_plugins).load(existing_tools=existing)
+    for plugin in loaded.plugins:
+        parts = [f"{len(plugin.tools)} tools" if plugin.tools else "", f"{plugin.hooks} hooks" if plugin.hooks else ""]
+        view.info(f"plugin '{plugin.name}': {', '.join(p for p in parts if p) or 'loaded'}")
+    for where, problem in loaded.errors:
+        view.notice(f"plugin {where} was not loaded: {problem}")
+    return loaded
 
 
 def build_agent(args: argparse.Namespace, cfg: Settings, view=None, name: str = "FlowAI") -> tuple[Agent, Approver]:
@@ -155,8 +196,16 @@ def build_agent(args: argparse.Namespace, cfg: Settings, view=None, name: str = 
     approver = Approver(mode, ask=view.gate)
     no_tools = getattr(args, "no_tools", False)
     tools = ToolRegistry([] if no_tools else default_toolset(), approver=approver, shield=Shield())
+    plugins = load_plugins(args, cfg, view, {t.name for t in tools.list_tools()})
+    tools.hooks = plugins.hooks
     if not no_tools:
+        for t in plugins.tools:
+            tools.register(t)
         for t in load_mcp_tools(cfg, view):
+            if tools.get(t.name):
+                # An MCP server must not be able to stand in for a built-in tool.
+                view.notice(f"MCP tool '{t.name}' skipped: a tool with that name already exists.")
+                continue
             tools.register(t)
 
     agent = Agent(
@@ -167,7 +216,10 @@ def build_agent(args: argparse.Namespace, cfg: Settings, view=None, name: str = 
         tools=tools,
         max_iterations=getattr(args, "max_iterations", None) or cfg.max_iterations,
         temperature=cfg.temperature,
+        hooks=plugins.hooks,
+        guardrails=Guardrails.from_config(cfg.guardrails),
     )
+    agent.plugins = plugins
 
     async def show(event):
         if event.event == "tool_start":
@@ -449,8 +501,12 @@ def cli_run(args: argparse.Namespace) -> int:
         return 1
 
     if args.quiet:
-        agent, _ = build_agent(args, cfg)
-        print(sanitize_terminal(redact(asyncio.run(agent.run(prompt)))))
+        agent, _ = build_agent(args, cfg, ui.QuietView())
+        try:
+            print(sanitize_terminal(redact(asyncio.run(agent.run(prompt)))))
+        except FlowAIError as exc:
+            ui.error(redact(str(exc)))
+            return 1
         return 0
 
     view = make_view(args)
@@ -463,9 +519,12 @@ def cli_run(args: argparse.Namespace) -> int:
         view.abort_turn()
         return 130
     except FlowAIError as exc:
-        view.error(str(exc))
+        view.error(redact(str(exc)))
         if model_unavailable(exc):
             suggest_models(view, agent.provider)
+        return 1
+    except Exception as exc:
+        view.error(unexpected_error(exc))
         return 1
     if args.cost:
         s = agent.tracer.summary()
@@ -507,7 +566,21 @@ def shield_report(cfg: Settings, approvals: str | None = None) -> list[tuple[str
     rows.append(("ok", "tripwires", "env dumps, key files and credential stores ask every time, even with --yolo"))
     rows.append(("ok", "exfiltration", "reading secrets and sending data in one call is blocked outright"))
     rows.append(("ok", "network guard", "fetch_url refuses localhost, private networks and cloud metadata"))
-    rows.append(("ok", "injection", "web and MCP output is fenced as untrusted data"))
+    rows.append(("ok", "injection", "web and MCP output is fenced as untrusted data; injected orders are flagged"))
+    g = cfg.guardrails
+    if g.jailbreak == "off":
+        rows.append(("warn", "guardrails", "jailbreak detection is off (guardrails.jailbreak: off)"))
+    else:
+        action = "refused" if g.jailbreak == "block" else "answered with the rules re-stated"
+        rows.append(("ok", "guardrails", f"jailbreak and prompt-extraction attempts are {action}, even disguised or split across turns"))
+    if g.redact_prompt_secrets:
+        rows.append(("ok", "prompts", "API keys pasted into a prompt are masked before they reach the model"))
+    else:
+        rows.append(("warn", "prompts", "keys pasted into a prompt are sent to the model (redact_prompt_secrets: false)"))
+    rows.append(("ok", "replies", "model output is redacted as it streams, so a key cannot leak split across chunks"))
+    rows.append(("ok", "project files", "a cloned repo's flowai.yaml cannot loosen approvals or guardrails, "
+                 "and its MCP servers start only with your approval"))
+    rows.append(("ok", "plugins", f"loaded only from installed packages and {plugins_dir()}, never from the project"))
 
     mode = approvals or cfg.approval
     if mode == "ask":
@@ -521,6 +594,43 @@ def shield_report(cfg: Settings, approvals: str | None = None) -> list[tuple[str
     if cfg.server.host not in ("127.0.0.1", "localhost", "::1"):
         rows.append(("warn", "server", f"configured to listen on {cfg.server.host}, beyond this machine"))
     return rows
+
+
+def plugin_report(plugins: PluginSet | None) -> list[tuple[str, str, str]]:
+    rows: list[tuple[str, str, str]] = []
+    if plugins is None:
+        return [("info", "plugins", "none loaded")]
+    for p in plugins.plugins:
+        parts = []
+        if p.tools:
+            parts.append("tools: " + ", ".join(p.tools))
+        if p.hooks:
+            parts.append(f"{p.hooks} hooks")
+        detail = "; ".join(parts) or "no tools or hooks"
+        rows.append(("ok", f"{p.name} {p.version}".strip(), f"{detail}  ({p.source})"))
+    for name in plugins.providers:
+        rows.append(("ok", name, "provider"))
+    for where, problem in plugins.errors:
+        rows.append(("bad", where, problem))
+    for failure in plugins.hooks.failures[-5:]:
+        rows.append(("warn", failure.hook, f"{failure.point} hook failed: {failure.error}"))
+    for name in plugins.skipped:
+        rows.append(("info", name, "disabled"))
+    if not rows:
+        rows.append(("info", "plugins", f"none installed; drop a .py file into {plugins_dir()} or install a package"))
+    return rows
+
+
+def unexpected_error(exc: BaseException) -> str:
+    """One redacted line for an error FlowAI did not anticipate; FLOWAI_DEBUG=1 adds the traceback."""
+    message = redact(f"unexpected {type(exc).__name__}: {exc}")
+    if os.getenv("FLOWAI_DEBUG"):
+        import traceback
+
+        message += "\n" + redact("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+    else:
+        message += "  (set FLOWAI_DEBUG=1 for details)"
+    return message
 
 
 def _git_ignored(directory: Path, name: str) -> bool:
@@ -626,7 +736,11 @@ def cli_chat(args: argparse.Namespace) -> int:
         if cmd == "/help":
             view.show_table(list(CHAT_COMMANDS.items()))
         elif cmd == "/model" and rest:
-            agent.switch_model(rest)
+            try:
+                agent.switch_model(rest)
+            except (FlowAIError, ValueError) as exc:
+                view.error(redact(str(exc)))
+                return True
             view.info(f"model {_arrow(view)} {rest} (conversation kept)")
         elif cmd == "/models":
             try:
@@ -669,6 +783,8 @@ def cli_chat(args: argparse.Namespace) -> int:
             view.info(f"{s['total_tokens']} tokens, est. ${s['total_cost_usd']:.4f}")
         elif cmd == "/shield":
             view.show_report("FlowAI shield", shield_report(cfg, approver.mode))
+        elif cmd == "/plugins":
+            view.show_report("FlowAI plugins", plugin_report(agent.plugins))
         elif cmd == "/reset":
             agent.reset_session()
             store.save(session_id, agent.messages)
@@ -708,10 +824,15 @@ def cli_chat(args: argparse.Namespace) -> int:
         except KeyboardInterrupt:
             view.abort_turn()
         except FlowAIError as exc:
-            view.error(str(exc))
+            view.error(redact(str(exc)))
             if model_unavailable(exc):
                 suggest_models(view, agent.provider)
             # Drop the unanswered prompt so the next turn is not confused by it.
+            if agent.messages and agent.messages[-1].role == "user":
+                agent.messages.pop()
+        except Exception as exc:
+            # A bug or a dropped connection costs one turn, not the session.
+            view.error(unexpected_error(exc))
             if agent.messages and agent.messages[-1].role == "user":
                 agent.messages.pop()
         store.save(session_id, agent.messages)
@@ -801,6 +922,16 @@ def cli_inspect(args: argparse.Namespace) -> int:
     return 0
 
 
+def cli_plugins(args: argparse.Namespace) -> int:
+    """List plugins, their tools and hooks, and any that failed to load."""
+    cfg = Settings.load()
+    loaded = PluginLoader(disabled=cfg.disabled_plugins).load(existing_tools={t.name for t in default_toolset()})
+    view = make_view(args)
+    view.show_report("FlowAI plugins", plugin_report(loaded))
+    view.info(f"plugin folder: {plugins_dir()}")
+    return 1 if loaded.errors else 0
+
+
 def cli_tools(args: argparse.Namespace) -> int:
     """List the built-in tools."""
     for t in default_toolset():
@@ -820,6 +951,7 @@ def _add_agent_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--no-tools", action="store_true", help="plain chat, no tools")
     p.add_argument("--max-iterations", type=int, help="cap on tool-calling rounds per prompt")
     p.add_argument("--plain", action="store_true", help="plain text output instead of the full interface")
+    p.add_argument("--no-plugins", action="store_true", help="start without loading any plugins")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -870,6 +1002,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--plain", action="store_true", help="plain text output")
     p.set_defaults(func=cli_shield)
 
+    p = sub.add_parser("plugins", help="list plugins, their tools and hooks")
+    p.add_argument("--plain", action="store_true", help="plain text output")
+    p.set_defaults(func=cli_plugins)
+
     p = sub.add_parser("serve", help="run the HTTP API (needs flowai-cli[server])")
     p.add_argument("--host", help="bind address (default 127.0.0.1)")
     p.add_argument("--port", type=int, help="port (default 8000)")
@@ -912,6 +1048,10 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print()
         return 130
+    except Exception as exc:
+        # Never a raw traceback: it can quote a request URL or header holding a key.
+        ui.error(unexpected_error(exc))
+        return 1
 
 
 if __name__ == "__main__":

@@ -73,6 +73,43 @@ aim for persistence (git hooks, shell startup files) or for internal services
   content. The system prompt tells the model never to follow instructions
   found inside it.
 
+**The conversation is guarded.** (`flowai/security/guardrails.py`)
+- A key pasted into a prompt is masked before the prompt is sent to the
+  provider, and you are told it happened.
+- Jailbreak and prompt-extraction attempts are recognised after the text is
+  folded: Unicode normalised, invisible characters removed, look-alike
+  Cyrillic and Greek letters mapped to Latin, leetspeak undone, and spacing or
+  punctuation between letters ignored. Text hidden in Unicode tag characters is
+  decoded and checked. The last few prompts are also read together, so an
+  attack split across messages is caught.
+- In `guard` mode (the CLI default) the turn goes ahead with a reminder of the
+  rules added for that turn only; in `block` mode (the default for
+  `flowai serve`) the prompt is refused and never reaches the model.
+- Replies and reasoning are redacted as they stream. Text is released one
+  whole word at a time, so a key cannot get through split across two chunks;
+  a PEM block is held back until it ends.
+- The same tool with the same arguments, called more than
+  `max_identical_tool_calls` times in one turn, is refused.
+
+**Project files are not trusted.** A `flowai.yaml` comes with whatever
+repository you cloned. It may tighten settings but cannot loosen them:
+`approval: auto`, `guardrails.jailbreak: off`, `redact_prompt_secrets: false`
+and higher limits are ignored, with a notice. An MCP server the project file
+defines starts only after you approve that exact command; "always" remembers
+it for that project until the command changes.
+
+**Plugins cannot weaken the shield.** Plugins load only from installed
+packages and `~/.flowai/plugins/`, never from the project. `pre_tool` hooks run
+before the shield grades a call; `post_tool` results are redacted again. A
+`pre_*` hook that crashes blocks the action instead of letting it through.
+Plugin and MCP tools cannot take the name of a built-in tool.
+
+**Errors do not leak.** Network failures from any provider become one clean,
+redacted message, and an unexpected error in the CLI is shown as one redacted
+line (`FLOWAI_DEBUG=1` for a redacted traceback) without ending the session.
+An interrupted tool call is repaired on the next turn rather than corrupting
+the conversation.
+
 **The terminal is protected.** Escape sequences and control characters are
 stripped from model and tool output before they are drawn. A fetched page
 cannot set your clipboard (OSC 52), retitle the window or hide text. Markdown
@@ -84,6 +121,8 @@ links are shown as text and URL, never as disguised hyperlinks.
 - rejects requests whose `Host` header is not local, which defeats DNS rebinding
 - refuses shell and python tools unless started with `--allow-shell`
 - never runs calls that touch secrets on behalf of an HTTP client
+- refuses jailbreak attempts outright, keeps FlowAI's security rules appended
+  to any system prompt a client sets, and never returns system prompts
 
 ## What FlowAI does not do
 
@@ -96,6 +135,12 @@ links are shown as text and URL, never as disguised hyperlinks.
   will reach the model.
 - Name resolution is checked before connecting, but a hostile DNS server can
   still answer differently on the second lookup (a rebinding race).
+- The guardrails are pattern checks. They catch the well-known jailbreaks
+  and their common disguises, but a novel phrasing can get past them. The
+  hard guarantees (keys never in tool output or child processes) do not
+  depend on the model obeying anything.
+- A plugin is code you installed. It runs with FlowAI's permissions, and the
+  shield cannot stop it doing what it likes outside its hooks.
 - MCP servers are programs you chose to run. FlowAI scrubs their environment
   and asks before each of their tool calls, but cannot see what they do inside.
 - A key you export in your shell is visible to any program you run in that

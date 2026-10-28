@@ -214,3 +214,13 @@ class PlainView:
     def show_models(self, models: list[str], current: str) -> None:
         for model in models:
             print(f"{'*' if model == current else ' '} {model}")
+
+
+class QuietView(PlainView):
+    """For `flowai run -q`: stdout carries the answer only; warnings go to stderr."""
+
+    def info(self, message: str) -> None:
+        pass
+
+    def notice(self, message: str) -> None:
+        print(paint(message, YELLOW), file=sys.stderr)

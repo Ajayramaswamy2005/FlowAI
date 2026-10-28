@@ -25,6 +25,13 @@ providers:
 #     command: "npx"
 #     args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
 
+# Checks on prompts and replies. A project file may tighten these, never loosen them.
+guardrails:
+  jailbreak: "guard"            # guard: remind the model of its rules; block: refuse the prompt; off
+  redact_prompt_secrets: true   # mask API keys pasted into a prompt before it is sent
+  max_prompt_chars: 400000
+  max_identical_tool_calls: 3   # stop a model stuck repeating the same call; 0 = no limit
+
 memory:
   backend: "in_memory"  # in_memory, qdrant, chroma
   url: "http://localhost:6333"

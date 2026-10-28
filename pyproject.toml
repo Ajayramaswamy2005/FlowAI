@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "flowai-cli"
-version = "0.3.0"
+version = "0.4.0"
 description = "FlowAI: an open-source, extensible Python agent harness with a terminal-first CLI."
 readme = "README.md"
 requires-python = ">=3.10"

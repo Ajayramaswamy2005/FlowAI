@@ -11,8 +11,10 @@ from pydantic import BaseModel, Field
 from flowai.memory.base import BaseMemory
 from flowai.observability.events import EventBus
 from flowai.observability.tracer import Tracer
+from flowai.plugins.hooks import HookManager
 from flowai.providers.base import BaseProvider, StreamChunk
 from flowai.providers.registry import get_provider
+from flowai.security.guardrails import Guardrails
 from flowai.tools.base import BaseTool
 from flowai.tools.registry import ToolRegistry
 
@@ -38,6 +40,8 @@ class BaseAgent(ABC):
         temperature: float = 0.7,
         tracer: Tracer | None = None,
         event_bus: EventBus | None = None,
+        hooks: HookManager | None = None,
+        guardrails: Guardrails | bool | None = None,
     ):
         self.name = name
         self.model = model
@@ -49,6 +53,16 @@ class BaseAgent(ABC):
         self.temperature = temperature
         self.tracer = tracer or Tracer()
         self.event_bus = event_bus or EventBus()
+        self.hooks = hooks if hooks is not None else HookManager()
+        if self.tools.hooks is None:
+            self.tools.hooks = self.hooks
+        # On unless switched off with guardrails=False: they only mask secrets and add reminders by default.
+        if guardrails is False:
+            self.guardrails: Guardrails | None = None
+        elif isinstance(guardrails, Guardrails):
+            self.guardrails = guardrails
+        else:
+            self.guardrails = Guardrails()
 
     @abstractmethod
     async def run(self, prompt: str, **kwargs: Any) -> str:

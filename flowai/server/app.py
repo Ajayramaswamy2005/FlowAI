@@ -8,7 +8,12 @@ The server drives agents that can touch the machine, so it is locked down:
   which stops DNS-rebinding attacks from a web page in your browser.
 - Shell and python tools are refused unless the server was started with
   --allow-shell, and every tool call goes through the Shield.
-- Error messages are redacted before they are returned.
+- Prompts go through the guardrails, and jailbreak attempts are refused
+  outright (an HTTP client is not the person at the keyboard). A client may
+  set an agent's system prompt, but FlowAI's security rules stay appended to
+  it, and system prompts are never returned.
+- Error messages are redacted before they are returned, including errors
+  nobody anticipated.
 """
 
 from __future__ import annotations
@@ -30,10 +35,12 @@ from flowai import __version__
 from flowai.agents.standard import Agent
 from flowai.config.settings import Settings
 from flowai.errors import FlowAIError
+from flowai.plugins.loader import PluginLoader
 from flowai.providers.registry import ProviderRegistry, get_provider
+from flowai.security.guardrails import Guardrails
 from flowai.security.secrets import redact
 from flowai.security.shield import Shield
-from flowai.tools.builtin import default_system_prompt, default_toolset
+from flowai.tools.builtin import default_system_prompt, default_toolset, with_security_rules
 from flowai.tools.registry import ToolRegistry
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"}
@@ -98,6 +105,17 @@ def create_app(
         return allow_shell
 
     tool_registry = ToolRegistry(default_toolset(), approver=server_approver, shield=Shield())
+    plugins = PluginLoader(disabled=cfg.disabled_plugins).load(existing_tools={t.name for t in tool_registry.list_tools()})
+    tool_registry.hooks = plugins.hooks
+    for t in plugins.tools:
+        tool_registry.register(t)
+    guard_config = cfg.guardrails.model_copy()
+    if guard_config.jailbreak == "guard":
+        guard_config.jailbreak = "block"
+
+    @app.exception_handler(Exception)
+    async def unexpected(request: Request, exc: Exception):
+        return JSONResponse({"detail": redact(f"Internal error: {type(exc).__name__}: {exc}")}, status_code=500)
 
     def make_agent(name: str, provider: str, model: str | None, system_prompt: str | None = None) -> Agent:
         try:
@@ -110,8 +128,10 @@ def create_app(
             name=name,
             provider=instance,
             model=instance.model,
-            system_prompt=system_prompt or default_system_prompt(),
+            system_prompt=with_security_rules(system_prompt) if system_prompt else default_system_prompt(),
             tools=tool_registry,
+            hooks=plugins.hooks,
+            guardrails=Guardrails.from_config(guard_config),
         )
 
     agents_store: dict[str, Agent] = {"default": make_agent("DefaultAgent", cfg.provider, cfg.model)}
@@ -132,7 +152,6 @@ def create_app(
                     "name": a.name,
                     "model": a.model,
                     "provider": a.provider.provider_name,
-                    "system_prompt": a.system_prompt,
                 }
                 for a in agents_store.values()
             ]
@@ -160,10 +179,13 @@ def create_app(
         async def sse_generator():
             try:
                 async for chunk in agent.stream(req.message):
+                    if chunk.notice:
+                        yield f"data: {json.dumps({'notice': redact(chunk.notice)})}\n\n"
                     if chunk.text_delta:
-                        yield f"data: {json.dumps({'token': redact(chunk.text_delta)})}\n\n"
-            except FlowAIError as exc:
-                yield f"data: {json.dumps({'error': redact(str(exc))})}\n\n"
+                        yield f"data: {json.dumps({'token': chunk.text_delta})}\n\n"
+            except Exception as exc:
+                # Headers are already sent, so the error travels in the stream; never a traceback.
+                yield f"data: {json.dumps({'error': redact(str(exc) or type(exc).__name__)})}\n\n"
             yield f"data: {json.dumps({'done': True})}\n\n"
 
         return StreamingResponse(sse_generator(), media_type="text/event-stream")
